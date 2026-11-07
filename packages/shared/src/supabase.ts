@@ -41,6 +41,8 @@ export function getSupabaseEnvConfig(): { url: string | null; anonKey: string | 
   return { url, anonKey };
 }
 
+const _clientCache = new Map<string, SupabaseClient>();
+
 /**
  * Creates or retrieves a typed Supabase client.
  * Returns null if Supabase URL and Key are not yet configured.
@@ -57,14 +59,22 @@ export function createApexSupabaseClient(
     return null;
   }
 
+  const cacheKey = `${url}:::${anonKey}`;
+  const existing = _clientCache.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
   try {
-    return createClient(url, anonKey, {
+    const client = createClient(url, anonKey, {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: true,
       },
     });
+    _clientCache.set(cacheKey, client);
+    return client;
   } catch (err) {
     console.warn('[Supabase] Failed to initialize client:', err);
     return null;

@@ -79,6 +79,9 @@ export interface LogInvestigationPanelProps {
   onSelectIncident?: (incidentId: string) => void;
   currentUser?: User | null;
   supabaseClient?: SupabaseClient | null;
+  initialProjectId?: string;
+  initialProject?: VercelProjectItem;
+  showProjectSelector?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +152,9 @@ export default function LogInvestigationPanel({
   onSelectIncident,
   currentUser,
   supabaseClient,
+  initialProjectId,
+  initialProject,
+  showProjectSelector = true,
 }: LogInvestigationPanelProps = {}) {
   const [activeTab, setActiveTab] = useState<TabKey>('input');
   const [inputMode, setInputMode] = useState<InputMode>('vercel');
@@ -169,9 +175,9 @@ export default function LogInvestigationPanel({
   const [isConnectingVercel, setIsConnectingVercel] = useState<boolean>(false);
   const [vercelError, setVercelError] = useState<string | null>(null);
 
-  const [projects, setProjects] = useState<VercelProjectItem[]>([]);
+  const [projects, setProjects] = useState<VercelProjectItem[]>(initialProject ? [initialProject] : []);
   const [isLoadingProjects, setIsLoadingProjects] = useState<boolean>(false);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>('');
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId || '');
   const [projectSearch, setProjectSearch] = useState<string>('');
 
   const [vercelLogs, setVercelLogs] = useState<string>('');
@@ -188,8 +194,8 @@ export default function LogInvestigationPanel({
 
   // Selected project object
   const selectedProject = useMemo(() => {
-    return projects.find(p => p.id === selectedProjectId) || null;
-  }, [projects, selectedProjectId]);
+    return projects.find(p => p.id === selectedProjectId) || initialProject || null;
+  }, [initialProject, projects, selectedProjectId]);
 
   // Check Vercel connection status on mount
   const checkVercelStatus = useCallback(async () => {
@@ -201,7 +207,7 @@ export default function LogInvestigationPanel({
       if (data.configured && data.valid && data.user) {
         setVercelConnected(true);
         setVercelUser(data.user);
-        fetchProjects();
+        if (showProjectSelector) fetchProjects();
       } else {
         setVercelConnected(false);
         setVercelUser(null);
@@ -211,7 +217,7 @@ export default function LogInvestigationPanel({
     } finally {
       setIsCheckingVercel(false);
     }
-  }, []);
+  }, [showProjectSelector]);
 
   useEffect(() => {
     checkVercelStatus();
@@ -219,6 +225,7 @@ export default function LogInvestigationPanel({
 
   // Fetch Vercel projects
   const fetchProjects = async () => {
+    if (!showProjectSelector) return;
     setIsLoadingProjects(true);
     setVercelError(null);
     try {
@@ -227,7 +234,7 @@ export default function LogInvestigationPanel({
       if (data.success && Array.isArray(data.projects)) {
         setProjects(data.projects);
         if (data.projects.length > 0 && !selectedProjectId) {
-          setSelectedProjectId(data.projects[0].id);
+          setSelectedProjectId(initialProjectId || data.projects[0].id);
         }
       } else {
         setVercelError(data.error || 'Failed to list Vercel projects.');
@@ -544,17 +551,19 @@ export default function LogInvestigationPanel({
               )}
             </button>
 
-            <button
-              onClick={() => setInputMode('manual')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-medium rounded-md transition ${
-                inputMode === 'manual'
-                  ? 'bg-slate-800 text-slate-100 shadow-md'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
-            >
-              <span>📄</span>
-              <span>Manual Paste / File Upload</span>
-            </button>
+            {showProjectSelector && (
+              <button
+                onClick={() => setInputMode('manual')}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 text-xs font-medium rounded-md transition ${
+                  inputMode === 'manual'
+                    ? 'bg-slate-800 text-slate-100 shadow-md'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                }`}
+              >
+                <span>📄</span>
+                <span>Manual Paste / File Upload</span>
+              </button>
+            )}
           </div>
 
           {/* ---------------------------------------------------------------- */}
@@ -651,6 +660,8 @@ export default function LogInvestigationPanel({
               {!isCheckingVercel && vercelConnected && (
                 <div className="space-y-4">
 
+                  {showProjectSelector && (
+                  <>
                   {/* Connected Account Bar */}
                   <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2.5">
                     <div className="flex items-center gap-2.5">
@@ -791,6 +802,8 @@ export default function LogInvestigationPanel({
                       </div>
                     )}
                   </div>
+                  </>
+                  )}
 
                   {/* Real Logs Terminal & Stream Viewer */}
                   <div className="rounded-xl border border-slate-800 bg-slate-950 p-4 space-y-3">

@@ -2,6 +2,7 @@ export * from './models/incident';
 export * from './models/telemetry';
 export * from './models/project';
 export * from './models/ws-events';
+export * from './models/knowledge';
 
 import * as _sb from './supabase';
 export const createApexSupabaseClient = _sb.createApexSupabaseClient;

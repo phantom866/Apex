@@ -6,8 +6,10 @@ import { healthRouter } from './routes/health';
 import { createIncidentsRouter } from './routes/incidents';
 import { createLogsRouter } from './routes/logs';
 import { createVercelRouter } from './routes/vercel';
+import { createKnowledgeRouter } from './routes/knowledge';
 import { ApexWebSocketManager } from './websocket';
 
+// Load apps/server/.env (copy of root .env — kept in sync manually or via CI)
 dotenv.config();
 
 const app = express();
@@ -37,6 +39,7 @@ app.use('/api', healthRouter);
 app.use('/api', createIncidentsRouter(wsManager));
 app.use('/api', createLogsRouter(wsManager));
 app.use('/api/vercel', createVercelRouter(wsManager));
+app.use('/api/knowledge', createKnowledgeRouter());
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -44,7 +47,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 server.listen(PORT, HOST, () => {
   console.log(`[APEX Server] Running on http://${HOST}:${PORT}`);
   console.log(`[APEX Server] WebSocket available at ws://${HOST}:${PORT}/ws`);
-  console.log(`[APEX Server] Health endpoint: http://${HOST}:${PORT}/health`);
+  console.log(`[APEX Server] Health endpoint: http://localhost:${PORT}/health`);
+  console.log(`[APEX Server] Qdrant endpoint: ${process.env.QDRANT_CLUSTER_ENDPOINT ? '✓ configured' : '✗ NOT SET — check .env'}`);
+  console.log(`[APEX Server] Gemini key:      ${process.env.GEMINI_API_KEY ? '✓ configured' : '✗ NOT SET — check .env'}`);
 });
 
 export { app, server };

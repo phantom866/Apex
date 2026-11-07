@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   createApexSupabaseClient,
   signInWithGoogle,
@@ -29,6 +29,30 @@ export default function MobileSupabaseAuthBar({
   const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  // Preserve callback references to prevent infinite re-render loops
+  const onUserChangeRef = useRef(onUserChange);
+  const onVercelTokenSyncedRef = useRef(onVercelTokenSynced);
+  const lastNotifiedUserIdRef = useRef<string | null>(null);
+  const lastNotifiedClientRef = useRef<SupabaseClient | null>(null);
+
+  useEffect(() => {
+    onUserChangeRef.current = onUserChange;
+  }, [onUserChange]);
+
+  useEffect(() => {
+    onVercelTokenSyncedRef.current = onVercelTokenSynced;
+  }, [onVercelTokenSynced]);
+
+  const notifyUserChange = useCallback((u: User | null, client: SupabaseClient | null) => {
+    const userId = u?.id || null;
+    if (lastNotifiedUserIdRef.current === userId && lastNotifiedClientRef.current === client) {
+      return;
+    }
+    lastNotifiedUserIdRef.current = userId;
+    lastNotifiedClientRef.current = client;
+    onUserChangeRef.current?.(u, client);
+  }, []);
+
   const [supabaseUrl, setSupabaseUrl] = useState<string>(() => {
     return (
       (typeof window !== 'undefined' ? localStorage.getItem('apex_supabase_url') : '') ||
@@ -46,6 +70,7 @@ export default function MobileSupabaseAuthBar({
     if (!url || !key) {
       setSupabase(null);
       setIsLoading(false);
+      notifyUserChange(null, null);
       return;
     }
 
@@ -53,6 +78,7 @@ export default function MobileSupabaseAuthBar({
     if (!client) {
       setSupabase(null);
       setIsLoading(false);
+      notifyUserChange(null, null);
       return;
     }
 
@@ -61,12 +87,12 @@ export default function MobileSupabaseAuthBar({
     client.auth.getSession().then(({ data }) => {
       const currentUser = data.session?.user || null;
       setUser(currentUser);
-      onUserChange?.(currentUser, client);
+      notifyUserChange(currentUser, client);
 
       if (currentUser) {
         fetchUserIntegration(client, currentUser.id, 'vercel').then((integration) => {
           if (integration && integration.token) {
-            onVercelTokenSynced?.(integration.token, integration.teamId || undefined);
+            onVercelTokenSyncedRef.current?.(integration.token, integration.teamId || undefined);
           }
         });
       }
@@ -77,12 +103,12 @@ export default function MobileSupabaseAuthBar({
       async (event, session) => {
         const authUser = session?.user || null;
         setUser(authUser);
-        onUserChange?.(authUser, client);
+        notifyUserChange(authUser, client);
 
         if (authUser && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED')) {
           const integration = await fetchUserIntegration(client, authUser.id, 'vercel');
           if (integration && integration.token) {
-            onVercelTokenSynced?.(integration.token, integration.teamId || undefined);
+            onVercelTokenSyncedRef.current?.(integration.token, integration.teamId || undefined);
           }
         }
       }
@@ -91,7 +117,7 @@ export default function MobileSupabaseAuthBar({
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, [onUserChange, onVercelTokenSynced]);
+  }, [notifyUserChange]);
 
   useEffect(() => {
     const cleanup = initClient(supabaseUrl, supabaseAnonKey);
@@ -118,7 +144,7 @@ export default function MobileSupabaseAuthBar({
     setIsLoading(true);
     await signOutSupabase(supabase);
     setUser(null);
-    onUserChange?.(null, supabase);
+    notifyUserChange(null, supabase);
     setIsLoading(false);
   };
 

@@ -24,6 +24,22 @@ export default function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [supabaseClient, setSupabaseClient] = useState<SupabaseClient | null>(null);
 
+  const handleUserChange = useCallback((u: User | null, client: SupabaseClient | null) => {
+    setAuthUser(u);
+    setSupabaseClient(client);
+    if (u && client) {
+      fetchUserIncidentsFromSupabase(client, u.id).then((synced) => {
+        if (synced && synced.length > 0) {
+          setIncidents((prev) => {
+            const map = new Map(prev.map(i => [i.id, i]));
+            synced.forEach(s => map.set(s.id, s));
+            return Array.from(map.values());
+          });
+        }
+      });
+    }
+  }, []);
+
   const handleVercelTokenSynced = useCallback((token: string, teamId?: string) => {
     fetch(`${API_URL}/api/vercel/token`, {
       method: 'POST',
@@ -33,8 +49,12 @@ export default function App() {
   }, []);
 
   const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connectWs = useCallback(() => {
+    if (socketRef.current && (socketRef.current.readyState === WebSocket.CONNECTING || socketRef.current.readyState === WebSocket.OPEN)) {
+      return;
+    }
     setWsStatus('connecting');
     const ws = new WebSocket(WS_URL);
     socketRef.current = ws;
@@ -77,7 +97,8 @@ export default function App() {
 
     ws.onclose = () => {
       setWsStatus('disconnected');
-      setTimeout(connectWs, 3000);
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = setTimeout(connectWs, 3000);
     };
 
     ws.onerror = (err) => {
@@ -89,7 +110,15 @@ export default function App() {
   useEffect(() => {
     connectWs();
     return () => {
-      socketRef.current?.close();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (socketRef.current) {
+        socketRef.current.onclose = null;
+        socketRef.current.onerror = null;
+        socketRef.current.close();
+        socketRef.current = null;
+      }
     };
   }, [connectWs]);
 
@@ -183,21 +212,7 @@ export default function App() {
 
       {/* Supabase Google Auth Sync Bar */}
       <MobileSupabaseAuthBar
-        onUserChange={(u, client) => {
-          setAuthUser(u);
-          setSupabaseClient(client);
-          if (u && client) {
-            fetchUserIncidentsFromSupabase(client, u.id).then((synced) => {
-              if (synced && synced.length > 0) {
-                setIncidents((prev) => {
-                  const map = new Map(prev.map(i => [i.id, i]));
-                  synced.forEach(s => map.set(s.id, s));
-                  return Array.from(map.values());
-                });
-              }
-            });
-          }
-        }}
+        onUserChange={handleUserChange}
         onVercelTokenSynced={handleVercelTokenSynced}
       />
 
