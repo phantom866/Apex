@@ -82,6 +82,30 @@ create policy "Users can manage own integrations"
 
 
 -- 3. USER INCIDENTS TABLE (Syncs incident operations across Desktop & Mobile)
+create table if not exists public.user_projects (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  user_email text,
+  user_name text,
+  project_id text not null,
+  project_name text not null,
+  framework text,
+  production_url text,
+  setup_completed boolean default false not null,
+  setup_completed_at timestamp with time zone,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  constraint unique_user_project unique (user_id, project_id)
+);
+
+alter table public.user_projects enable row level security;
+
+create policy "Users can manage own projects"
+  on public.user_projects for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- 4. USER INCIDENTS TABLE (Syncs incident operations across Desktop & Mobile)
 create table if not exists public.user_incidents (
   id text primary key,
   user_id uuid references auth.users on delete cascade not null,
@@ -106,7 +130,7 @@ create policy "Users can manage own incidents"
   with check (auth.uid() = user_id);
 
 
--- 4. USER INVESTIGATION REPORTS TABLE (Syncs correlated root-cause reports)
+-- 5. USER INVESTIGATION REPORTS TABLE (Syncs correlated root-cause reports)
 create table if not exists public.user_reports (
   id text primary key,
   user_id uuid references auth.users on delete cascade not null,
@@ -134,4 +158,5 @@ create policy "Users can manage own reports"
 -- 5. ENABLE REALTIME BROADCAST
 alter publication supabase_realtime add table public.user_incidents;
 alter publication supabase_realtime add table public.user_integrations;
+alter publication supabase_realtime add table public.user_projects;
 alter publication supabase_realtime add table public.user_reports;

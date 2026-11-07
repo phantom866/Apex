@@ -1,6 +1,20 @@
 import { createClient, SupabaseClient, User, Session } from '@supabase/supabase-js';
 import { Incident } from './models/incident';
 
+export interface UserProject {
+  id?: string;
+  userId: string;
+  userEmail?: string | null;
+  userName?: string | null;
+  projectId: string;
+  projectName: string;
+  framework?: string | null;
+  productionUrl?: string | null;
+  setupCompleted: boolean;
+  setupCompletedAt?: string | null;
+  updatedAt?: string;
+}
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -186,6 +200,60 @@ export async function fetchUserIntegration(
     };
   } catch {
     return null;
+  }
+}
+
+export async function upsertUserProject(
+    client: SupabaseClient,
+    project: Omit<UserProject, 'userId'>,
+    user: Pick<User, 'id' | 'email' | 'user_metadata'>,
+  ): Promise<{ success: boolean; error: string | null }> {
+    try {
+      const { error } = await client.from('user_projects').upsert({
+        user_id: user.id,
+        user_email: user.email || null,
+        user_name: user.user_metadata?.full_name || user.user_metadata?.name || null,
+        project_id: project.projectId,
+        project_name: project.projectName,
+        framework: project.framework || null,
+        production_url: project.productionUrl || null,
+        setup_completed: project.setupCompleted,
+        setup_completed_at: project.setupCompletedAt || null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,project_id' });
+      return error
+        ? { success: false, error: error.message }
+        : { success: true, error: null };
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+export async function fetchUserProjects(
+    client: SupabaseClient,
+    userId: string,
+  ): Promise<UserProject[]> {
+    try {
+      const { data, error } = await client
+        .from('user_projects')
+        .select('*')
+        .eq('user_id', userId);
+      if (error || !data) return [];
+      return data.map((row: any) => ({
+        id: row.id,
+        userId: row.user_id,
+        userEmail: row.user_email,
+        userName: row.user_name,
+        projectId: row.project_id,
+        projectName: row.project_name,
+        framework: row.framework,
+        productionUrl: row.production_url,
+        setupCompleted: row.setup_completed,
+        setupCompletedAt: row.setup_completed_at,
+        updatedAt: row.updated_at,
+      }));
+    } catch {
+      return [];
   }
 }
 

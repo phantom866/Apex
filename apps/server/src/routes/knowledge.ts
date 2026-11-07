@@ -174,6 +174,7 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
     if (!values || values.length === 0) {
       throw new Error('Gemini returned an empty embedding vector.');
     }
+
     vectors.push(values);
   }
 
@@ -193,6 +194,17 @@ async function ensureCollection(client: QdrantClient, collectionName: string): P
       vectors: { size: VECTOR_SIZE, distance: 'Cosine' },
     });
     console.log(`[Knowledge] Created Qdrant collection '${collectionName}'`);
+  }
+
+  // Qdrant requires payload indexes for filtered reads. Run this for existing
+  // collections too so collections created before project-scoped chat continue
+  // to work without manual migration.
+  for (const fieldName of ['userId', 'projectId']) {
+    await client.createPayloadIndex(collectionName, {
+      field_name: fieldName,
+      field_schema: 'keyword',
+      wait: true,
+    });
   }
 }
 
@@ -234,6 +246,7 @@ export function createKnowledgeRouter(): Router {
         success: false,
         error: parse.error.errors.map((e) => e.message).join('; '),
       });
+
       return;
     }
 
@@ -362,6 +375,78 @@ export function createKnowledgeRouter(): Router {
       doc.errorMessage = msg;
       docStore.set(documentId, doc);
 
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  /**
+   * POST /api/knowledge/chat
+   * Answers a project question using only the authenticated user's project README.
+   */
+  router.post('/chat', async (req: Request, res: Response): Promise<void> => {
+    const { userId, projectId, projectName, message } = req.body as {
+      userId?: string;
+      projectId?: string;
+      projectName?: string;
+      message?: string;
+    };
+    if (!userId || !projectId || !projectName || !message?.trim()) {
+      res.status(400).json({ success: false, error: 'userId, projectId, projectName, and message are required.' });
+      return;
+    }
+
+    try {
+      const qdrant = getQdrantClient();
+      const ai = getGemini();
+      if (!qdrant || !ai) {
+        res.status(503).json({ success: false, error: 'README chat requires both Qdrant and Gemini configuration.' });
+        return;
+      }
+
+      const collectionName = projectToCollectionName(projectName);
+      await ensureCollection(qdrant, collectionName);
+      const projectFilter = {
+        must: [
+          { key: 'userId', match: { value: userId } },
+          { key: 'projectId', match: { value: projectId } },
+        ],
+      };
+      const scrolled = await qdrant.scroll(collectionName, {
+        filter: projectFilter,
+        limit: 12,
+        with_payload: true,
+      });
+      const points = scrolled.points || [];
+      const context = points
+        .map((match: any) => String(match.payload?.text || ''))
+        .filter(Boolean)
+        .join('\n\n--- README SECTION ---\n\n');
+      if (!context) {
+        res.status(404).json({ success: false, error: 'No README has been indexed for this project.' });
+        return;
+      }
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: `You are a senior software architect helping improve the project "${projectName}".
+Answer the user's question using only the README context below. Be practical and explain improvements to project structure, maintainability, testing, security, and deployment when relevant. If the README does not contain enough information, say what is missing instead of inventing details.
+
+User question:
+${message.trim()}
+
+README context:
+${context.slice(0, 24000)}`,
+      });
+      res.json({
+        success: true,
+        data: {
+          answer: response.text || 'Gemini returned an empty answer.',
+          sources: points.map((match: any) => match.payload?.heading || 'README section').filter(Boolean),
+        },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[Knowledge] Project chat failed:', msg);
       res.status(500).json({ success: false, error: msg });
     }
   });

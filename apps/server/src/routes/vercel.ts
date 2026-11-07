@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ApexWebSocketManager } from '../websocket';
+import { diagnoseProjectLogs } from '../gemini';
 
 // Runtime in-memory token cache (persists for the server process duration)
 let runtimeVercelToken: string | null = process.env.VERCEL_TOKEN || null;
@@ -455,6 +456,74 @@ export function createVercelRouter(_wsManager: ApexWebSocketManager): Router {
         warnCount,
         message: formattedLines.length === 0 ? 'No runtime event logs recorded for this deployment yet.' : undefined
       });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  /**
+   * POST /api/vercel/projects/:projectId/diagnosis
+   * Fetches the recent project logs, extracts errors, and produces a structured diagnosis.
+   */
+  router.post('/projects/:projectId/diagnosis', async (req: Request, res: Response): Promise<void> => {
+    const token = getVercelToken(req);
+    const teamId = getVercelTeamId(req);
+    const rawProjectId = req.params.projectId;
+    const projectId = Array.isArray(rawProjectId) ? rawProjectId[0] : rawProjectId;
+    const limit = Math.min(parseInt((req.body?.limit as string) || '150', 10), 250);
+
+    if (!token) {
+      res.status(401).json({ success: false, error: 'Vercel token not configured.' });
+      return;
+    }
+
+    try {
+      const project = await vercelFetch<any>(`/v9/projects/${encodeURIComponent(projectId)}`, { token, teamId });
+      const projectName = project.name || projectId;
+      let deploymentId = project.targets?.production?.id || project.latestDeployments?.[0]?.id;
+      if (!deploymentId) {
+        const deployments = await vercelFetch<{ deployments: any[] }>(
+          `/v6/deployments?projectId=${encodeURIComponent(projectId)}&limit=1`,
+          { token, teamId },
+        );
+        deploymentId = deployments.deployments?.[0]?.uid || deployments.deployments?.[0]?.id;
+      }
+
+      let rawEvents: VercelDeploymentEvent[] = [];
+      if (deploymentId) {
+        try {
+          rawEvents = await vercelFetch<VercelDeploymentEvent[]>(
+            `/v3/deployments/${encodeURIComponent(deploymentId)}/events`,
+            { token, teamId },
+          );
+        } catch {
+          const fallback = await vercelFetch<{ events?: VercelDeploymentEvent[] } | VercelDeploymentEvent[]>(
+            `/v2/deployments/${encodeURIComponent(deploymentId)}/events?direction=backward&limit=${limit}`,
+            { token, teamId },
+          );
+          rawEvents = Array.isArray(fallback) ? fallback : (fallback.events || []);
+        }
+      }
+
+      rawEvents.sort((a, b) => (b.created || b.date || 0) - (a.created || a.date || 0));
+      const rawLogs = rawEvents
+        .slice(0, limit)
+        .reverse()
+        .map((event) => formatVercelEventToLogLine(event, projectName))
+        .join('\n');
+      const recentErrors = rawLogs
+        .split('\n')
+        .filter((line) => /\[ERROR\]|\[FATAL\]/i.test(line))
+        .slice(-30)
+        .map((line) => {
+          const timestamp = line.match(/^\d{4}-\d{2}-\d{2}T[^ ]+/)?.[0] || new Date().toISOString();
+          const level = line.match(/\[(ERROR|FATAL)\]/i)?.[1]?.toLowerCase() || 'error';
+          return { timestamp, level, message: line.replace(/^\S+\s+\[(?:ERROR|FATAL)\]\s+\[[^\]]+\]\s*/, '') };
+        });
+
+      const diagnosis = await diagnoseProjectLogs(projectId, projectName, rawLogs, recentErrors);
+      res.json({ success: true, data: diagnosis });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(500).json({ success: false, error: msg });

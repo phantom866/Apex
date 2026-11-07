@@ -19,6 +19,8 @@ import {
   signInWithGoogle,
   signOutSupabase,
   fetchUserIntegration,
+  fetchUserProjects,
+  upsertUserProject,
   saveUserIntegration,
   syncIncidentToSupabase,
   UploadReadmeResponse,
@@ -55,6 +57,24 @@ function addIndexedProject(userId: string, projectId: string) {
     localStorage.setItem(`apex_indexed_${userId}`, JSON.stringify([...list, projectId]));
   }
 }
+
+type ProjectDiagnosis = {
+  projectId: string;
+  projectName: string;
+  generatedAt: string;
+  dangerLevel: 'low' | 'medium' | 'high' | 'critical';
+  summary: string;
+  recentErrors: Array<{ timestamp: string; level: string; message: string }>;
+  probableRootCause: string;
+  recommendedActions: string[];
+  analyzedLogCount: number;
+  poweredByGemini: boolean;
+};
+
+type ProjectChatMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCREEN 1 — Login
@@ -163,6 +183,9 @@ function ProjectsScreen({
   const [connectError, setConnectError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [indexedProjectIds, setIndexedProjectIds] = useState<string[]>(() => getIndexedProjects(user.id));
+  const [diagnosis, setDiagnosis] = useState<ProjectDiagnosis | null>(null);
+  const [diagnosingProjectId, setDiagnosingProjectId] = useState<string | null>(null);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
 
   // Refresh indexed list when we return to projects screen
   useEffect(() => {
@@ -203,7 +226,27 @@ function ProjectsScreen({
       const res = await fetch(`${API_URL}/api/vercel/projects`);
       const data = await res.json();
       if (data.success && Array.isArray(data.projects)) {
-        setProjects(data.projects);
+        const savedProjects = await fetchUserProjects(supabase, user.id);
+        const savedById = new Map(savedProjects.map((project) => [project.projectId, project]));
+        const mergedProjects: Array<VercelProjectItem & { setupCompleted: boolean }> = data.projects.map((project: VercelProjectItem) => {
+          const saved = savedById.get(project.id);
+          return {
+            ...project,
+            setupCompleted: Boolean(saved?.setupCompleted || getIndexedProjects(user.id).includes(project.id)),
+          };
+        });
+        setProjects(mergedProjects);
+        setIndexedProjectIds(
+          mergedProjects.filter((project) => project.setupCompleted).map((project) => project.id)
+        );
+        await Promise.all(mergedProjects.map((project) => upsertUserProject(supabase, {
+          projectId: project.id,
+          projectName: project.name,
+          framework: project.framework,
+          productionUrl: project.productionUrl,
+          setupCompleted: project.setupCompleted,
+          setupCompletedAt: savedById.get(project.id)?.setupCompletedAt,
+        }, user)));
       }
     } catch { /* ignore */ }
     finally { setIsLoadingProjects(false); }
@@ -244,6 +287,26 @@ function ProjectsScreen({
     e.preventDefault();
     if (!vercelToken.trim()) return;
     await connectWithToken(vercelToken.trim(), vercelTeamId.trim() || undefined);
+  };
+
+  const handleDiagnoseProject = async (project: VercelProjectItem) => {
+    setDiagnosingProjectId(project.id);
+    setDiagnosisError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/vercel/projects/${encodeURIComponent(project.id)}/diagnosis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Could not diagnose this project.');
+      }
+      setDiagnosis(data.data as ProjectDiagnosis);
+    } catch (err: unknown) {
+      setDiagnosisError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDiagnosingProjectId(null);
+    }
   };
 
   const handleDisconnect = async () => {
@@ -435,9 +498,14 @@ function ProjectsScreen({
                       {readyProjects.map((project) => {
                         const latestDeploy = project.latestDeployments?.[0];
                         return (
-                          <button
+                          <div
                             key={project.id}
                             onClick={() => onSelectProject(project, true)}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') onSelectProject(project, true);
+                            }}
                             className="group text-left rounded-xl border border-teal-800/40 hover:border-teal-500/60 bg-teal-950/10 hover:bg-teal-950/20 p-4 transition-all shadow-sm space-y-3"
                           >
                             <div className="flex items-start justify-between gap-2">
@@ -464,10 +532,22 @@ function ProjectsScreen({
                                 )}
                               </div>
                             )}
-                            <div className="text-[11px] text-teal-600 group-hover:text-teal-400 transition flex items-center gap-1">
-                              <span className="h-1.5 w-1.5 rounded-full bg-teal-400 animate-pulse" /> Open dashboard →
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-[11px] text-teal-600 group-hover:text-teal-400 transition flex items-center gap-1">
+                                <span className="h-1.5 w-1.5 rounded-full bg-teal-400 animate-pulse" /> Open dashboard →
+                              </div>
+                              <button
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDiagnoseProject(project);
+                                }}
+                                disabled={diagnosingProjectId === project.id}
+                                className="rounded-md border border-violet-700/60 bg-violet-950/40 px-2 py-1 text-[10px] font-semibold text-violet-300 hover:bg-violet-900/50 disabled:opacity-50"
+                              >
+                                {diagnosingProjectId === project.id ? 'Checking…' : 'Diagnosis'}
+                              </button>
                             </div>
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -496,9 +576,14 @@ function ProjectsScreen({
                       {newProjects.map((project) => {
                         const latestDeploy = project.latestDeployments?.[0];
                         return (
-                          <button
+                          <div
                             key={project.id}
                             onClick={() => onSelectProject(project, false)}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') onSelectProject(project, false);
+                            }}
                             className="group text-left rounded-xl border border-slate-800 hover:border-indigo-500/40 bg-slate-900/60 hover:bg-slate-900 p-4 transition-all shadow-sm space-y-3 opacity-80 hover:opacity-100"
                           >
                             <div className="flex items-start justify-between gap-2">
@@ -528,7 +613,7 @@ function ProjectsScreen({
                             <div className="text-[11px] text-slate-600 group-hover:text-indigo-400 transition">
                               Upload README to set up →
                             </div>
-                          </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -540,6 +625,70 @@ function ProjectsScreen({
           </div>
         )}
       </div>
+
+      {diagnosisError && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-sm rounded-lg border border-rose-800/60 bg-rose-950/95 px-4 py-3 text-xs text-rose-200 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <span>Diagnosis failed: {diagnosisError}</span>
+            <button onClick={() => setDiagnosisError(null)} className="text-rose-300 hover:text-white">×</button>
+          </div>
+        </div>
+      )}
+
+      {diagnosis && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-5" onClick={() => setDiagnosis(null)}>
+          <div
+            className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-violet-400">AI project diagnosis</p>
+                <h2 className="mt-1 text-xl font-bold text-white">{diagnosis.projectName}</h2>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  {diagnosis.analyzedLogCount} recent log lines · {new Date(diagnosis.generatedAt).toLocaleString()}
+                </p>
+              </div>
+              <button onClick={() => setDiagnosis(null)} className="text-xl text-slate-500 hover:text-white">×</button>
+            </div>
+            <div className="mt-5 flex items-center gap-3">
+              <span className={`rounded-lg border px-3 py-1.5 text-sm font-bold uppercase ${
+                diagnosis.dangerLevel === 'critical' ? 'border-rose-500/60 bg-rose-950/50 text-rose-300'
+                  : diagnosis.dangerLevel === 'high' ? 'border-orange-500/60 bg-orange-950/50 text-orange-300'
+                  : diagnosis.dangerLevel === 'medium' ? 'border-amber-500/60 bg-amber-950/50 text-amber-300'
+                  : 'border-emerald-500/60 bg-emerald-950/50 text-emerald-300'
+              }`}>
+                {diagnosis.dangerLevel} danger
+              </span>
+              <span className="text-[11px] text-slate-500">{diagnosis.poweredByGemini ? 'Analyzed by Gemini AI' : 'Heuristic diagnosis'}</span>
+            </div>
+            <div className="mt-5 space-y-4 text-sm">
+              <section>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Summary</h3>
+                <p className="mt-1 leading-relaxed text-slate-200">{diagnosis.summary}</p>
+              </section>
+              <section>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Probable root cause</h3>
+                <p className="mt-1 leading-relaxed text-slate-200">{diagnosis.probableRootCause}</p>
+              </section>
+              <section>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Recommended actions</h3>
+                <ol className="mt-1 list-decimal space-y-1 pl-5 text-slate-200">
+                  {diagnosis.recommendedActions.map((action, index) => <li key={index}>{action}</li>)}
+                </ol>
+              </section>
+              <section>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Recent errors sent for analysis</h3>
+                <div className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-rose-300">
+                  {diagnosis.recentErrors.length === 0
+                    ? 'No recent errors found.'
+                    : diagnosis.recentErrors.map((error, index) => <div key={index}>{error.timestamp} {error.message}</div>)}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -550,11 +699,13 @@ function ProjectsScreen({
 
 function SetupScreen({
   user,
+  supabase,
   project,
   onSetupComplete,
   onBack,
 }: {
   user: User;
+  supabase: SupabaseClient;
   project: VercelProjectItem;
   onSetupComplete: () => void;
   onBack: () => void;
@@ -600,6 +751,17 @@ function SetupScreen({
       if (data.success) {
         setResult(data);
         addIndexedProject(user.id, project.id);
+        const syncResult = await upsertUserProject(supabase, {
+          projectId: project.id,
+          projectName: project.name,
+          framework: project.framework,
+          productionUrl: project.productionUrl,
+          setupCompleted: true,
+          setupCompletedAt: new Date().toISOString(),
+        }, user);
+        if (!syncResult.success) {
+          setUploadError(`Project indexed, but progress could not be saved: ${syncResult.error}`);
+        }
       } else {
         setUploadError(data.error || 'Upload failed.');
       }
@@ -768,10 +930,18 @@ function DashboardScreen({
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
   const [aiAnalysisMap, setAiAnalysisMap] = useState<Record<string, { analysis: string; rootCause: string; mitigations: string[] }>>({});
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [rightPanel, setRightPanel] = useState<'logs' | 'incident'>('logs');
+  const [rightPanel, setRightPanel] = useState<'logs' | 'chat' | 'incident'>('logs');
+  const [chatMessages, setChatMessages] = useState<ProjectChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatting, setIsChatting] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [projectDiagnosis, setProjectDiagnosis] = useState<ProjectDiagnosis | null>(null);
+  const [isDiagnosingProject, setIsDiagnosingProject] = useState(false);
+  const [projectDiagnosisError, setProjectDiagnosisError] = useState<string | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isUnmountedRef = useRef(false);
 
   const connectWs = useCallback(() => {
     if (socketRef.current && (socketRef.current.readyState === WebSocket.CONNECTING || socketRef.current.readyState === WebSocket.OPEN)) return;
@@ -800,6 +970,7 @@ function DashboardScreen({
       } catch { /* ignore */ }
     };
     ws.onclose = () => {
+      if (isUnmountedRef.current) return;
       setWsStatus('disconnected');
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       reconnectRef.current = setTimeout(connectWs, 3000);
@@ -808,13 +979,20 @@ function DashboardScreen({
   }, []);
 
   useEffect(() => {
+    isUnmountedRef.current = false;
     connectWs();
     fetch(`${API_URL}/api/incidents`).then((r) => r.json()).then((d) => {
       if (d.success && Array.isArray(d.data)) setIncidents(d.data);
     }).catch(() => {});
     return () => {
+      isUnmountedRef.current = true;
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
-      if (socketRef.current) { socketRef.current.onclose = null; socketRef.current.close(); }
+      if (socketRef.current) {
+        socketRef.current.onclose = null;
+        socketRef.current.onerror = null;
+        if (socketRef.current.readyState === WebSocket.OPEN) socketRef.current.close();
+        socketRef.current = null;
+      }
     };
   }, [connectWs]);
 
@@ -842,6 +1020,55 @@ function DashboardScreen({
   const handleSelectIncident = (incidentId: string) => {
     const found = incidents.find((i) => i.id === incidentId);
     if (found) { setSelectedIncident(found); setRightPanel('incident'); }
+  };
+
+  const handleDiagnoseProject = async () => {
+    setIsDiagnosingProject(true);
+    setProjectDiagnosisError(null);
+    try {
+      const response = await fetch(`${API_URL}/api/vercel/projects/${encodeURIComponent(project.id)}/diagnosis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Could not diagnose this project.');
+      }
+      setProjectDiagnosis(data.data as ProjectDiagnosis);
+    } catch (err: unknown) {
+      setProjectDiagnosisError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsDiagnosingProject(false);
+    }
+  };
+
+  const handleProjectChat = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const message = chatInput.trim();
+    if (!message || isChatting) return;
+    setChatInput('');
+    setChatError(null);
+    setChatMessages((previous) => [...previous, { role: 'user', content: message }]);
+    setIsChatting(true);
+    try {
+      const response = await fetch(`${API_URL}/api/knowledge/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          projectId: project.id,
+          projectName: project.name,
+          message,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || 'Gemini chat failed.');
+      setChatMessages((previous) => [...previous, { role: 'assistant', content: data.data.answer }]);
+    } catch (err: unknown) {
+      setChatError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsChatting(false);
+    }
   };
 
   const userFullName = user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split('@')[0] || 'User';
@@ -883,6 +1110,12 @@ function DashboardScreen({
               className={`rounded px-3 py-1 text-xs font-medium transition ${rightPanel === 'logs' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
             >
               Live Logs
+            </button>
+            <button
+              onClick={() => setRightPanel('chat')}
+              className={`rounded px-3 py-1 text-xs font-medium transition ${rightPanel === 'chat' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Chat with Gemini
             </button>
             <button
               onClick={() => setRightPanel('incident')}
@@ -953,12 +1186,43 @@ function DashboardScreen({
           <section className="flex flex-1 flex-col overflow-hidden">
             <LogInvestigationPanel
               onSelectIncident={handleSelectIncident}
+              onDiagnoseProject={handleDiagnoseProject}
+              isDiagnosingProject={isDiagnosingProject}
               currentUser={user}
               supabaseClient={supabase}
               initialProjectId={project.id}
               initialProject={project}
               showProjectSelector={false}
             />
+          </section>
+        ) : rightPanel === 'chat' ? (
+          <section className="flex flex-1 flex-col overflow-hidden bg-slate-950">
+            <div className="border-b border-slate-800 bg-slate-900/50 px-6 py-4">
+              <p className="text-[10px] uppercase tracking-wider text-violet-400">Project-aware Gemini chat</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">{project.name}</h2>
+              <p className="mt-1 text-xs text-slate-500">Answers use only this project’s indexed README.</p>
+            </div>
+            <div className="flex-1 space-y-4 overflow-y-auto p-6">
+              {chatMessages.length === 0 && (
+                <div className="rounded-xl border border-dashed border-slate-800 p-6 text-center text-sm text-slate-500">
+                  Ask Gemini how to improve this project’s structure, testing, security, or deployment.
+                </div>
+              )}
+              {chatMessages.map((message, index) => (
+                <div key={index} className={`max-w-3xl rounded-xl p-4 text-sm leading-relaxed whitespace-pre-wrap ${message.role === 'user' ? 'ml-auto bg-indigo-950/50 text-indigo-100' : 'bg-slate-900 text-slate-200'}`}>
+                  <div className="mb-1 text-[10px] uppercase tracking-wider text-slate-500">{message.role === 'user' ? 'You' : 'Gemini AI'}</div>
+                  {message.content}
+                </div>
+              ))}
+              {isChatting && <div className="text-xs text-slate-500">Gemini is reviewing the README…</div>}
+              {chatError && <div className="rounded-lg border border-rose-800/60 bg-rose-950/30 p-3 text-xs text-rose-300">{chatError}</div>}
+            </div>
+            <form onSubmit={handleProjectChat} className="border-t border-slate-800 bg-slate-900/50 p-4">
+              <div className="flex gap-2">
+                <input value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="How can I improve this project structure?" className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:border-violet-500 focus:outline-none" />
+                <button type="submit" disabled={isChatting || !chatInput.trim()} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">Send</button>
+              </div>
+            </form>
           </section>
         ) : (
           <section className="flex flex-1 flex-col overflow-y-auto bg-slate-950 p-6">
@@ -1018,6 +1282,37 @@ function DashboardScreen({
                     <p className="text-xs text-slate-500 italic">Click "Run AI Root-Cause Analysis" to analyse this incident with Gemini.</p>
                   )}
                 </div>
+                {projectDiagnosisError && (
+                  <div className="fixed bottom-5 right-5 z-50 rounded-lg border border-rose-800/60 bg-rose-950/95 px-4 py-3 text-xs text-rose-200">
+                  Diagnosis failed: {projectDiagnosisError}
+                  </div>
+                )}
+                {projectDiagnosis && (
+                  <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-5" onClick={() => setProjectDiagnosis(null)}>
+                  <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-violet-400">Gemini AI project diagnosis</p>
+                        <h2 className="mt-1 text-xl font-bold text-white">{projectDiagnosis.projectName}</h2>
+                      </div>
+                      <button onClick={() => setProjectDiagnosis(null)} className="text-xl text-slate-500 hover:text-white">×</button>
+                    </div>
+                    <div className="mt-5 space-y-4 text-sm">
+                      <div>
+                        <span className="rounded-lg border border-violet-500/60 bg-violet-950/50 px-3 py-1.5 font-bold uppercase text-violet-300">
+                          {projectDiagnosis.dangerLevel} danger
+                        </span>
+                        <span className="ml-3 text-[11px] text-slate-500">
+                          {projectDiagnosis.poweredByGemini ? 'Analyzed by Gemini AI' : 'Fallback diagnosis'}
+                        </span>
+                      </div>
+                      <section><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Summary</h3><p className="mt-1 text-slate-200">{projectDiagnosis.summary}</p></section>
+                      <section><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Probable root cause</h3><p className="mt-1 text-slate-200">{projectDiagnosis.probableRootCause}</p></section>
+                      <section><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Recommended actions</h3><ol className="mt-1 list-decimal space-y-1 pl-5 text-slate-200">{projectDiagnosis.recommendedActions.map((action, index) => <li key={index}>{action}</li>)}</ol></section>
+                    </div>
+                  </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-slate-600 space-y-2">
@@ -1131,10 +1426,11 @@ export default function App() {
     );
   }
 
-  if (screen === 'setup' && authUser && selectedProject) {
+  if (screen === 'setup' && authUser && supabaseClient && selectedProject) {
     return (
       <SetupScreen
         user={authUser}
+        supabase={supabaseClient}
         project={selectedProject}
         onSetupComplete={handleSetupComplete}
         onBack={() => setScreen('projects')}

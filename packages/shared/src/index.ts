@@ -10,8 +10,10 @@ export const signInWithGoogle = _sb.signInWithGoogle;
 export const signOutSupabase = _sb.signOutSupabase;
 export const saveUserIntegration = _sb.saveUserIntegration;
 export const fetchUserIntegration = _sb.fetchUserIntegration;
+export const upsertUserProject = _sb.upsertUserProject;
+export const fetchUserProjects = _sb.fetchUserProjects;
 export const syncIncidentToSupabase = _sb.syncIncidentToSupabase;
 export const fetchUserIncidentsFromSupabase = _sb.fetchUserIncidentsFromSupabase;
 export const getSupabaseEnvConfig = _sb.getSupabaseEnvConfig;
 
-export type { UserProfile, UserIntegration, User, Session, SupabaseClient } from './supabase';
+export type { UserProfile, UserIntegration, UserProject, User, Session, SupabaseClient } from './supabase';

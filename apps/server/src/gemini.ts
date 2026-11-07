@@ -22,6 +22,123 @@ export interface AiIncidentDiagnosis {
   poweredByGemini: boolean;
 }
 
+export type ProjectDangerLevel = 'low' | 'medium' | 'high' | 'critical';
+
+export interface ProjectDiagnosis {
+  projectId: string;
+  projectName: string;
+  generatedAt: string;
+  dangerLevel: ProjectDangerLevel;
+  summary: string;
+  recentErrors: Array<{ timestamp: string; level: string; message: string }>;
+  probableRootCause: string;
+  recommendedActions: string[];
+  analyzedLogCount: number;
+  poweredByGemini: boolean;
+}
+
+export async function diagnoseProjectLogs(
+  projectId: string,
+  projectName: string,
+  logs: string,
+  recentErrors: Array<{ timestamp: string; level: string; message: string }>,
+): Promise<ProjectDiagnosis> {
+  const generatedAt = new Date().toISOString();
+  const base = {
+    projectId,
+    projectName,
+    generatedAt,
+    recentErrors,
+    analyzedLogCount: logs.split('\n').filter(Boolean).length,
+  };
+
+  if (recentErrors.length === 0) {
+    return {
+      ...base,
+      dangerLevel: 'low',
+      summary: 'No recent error-level log entries were found for this project.',
+      probableRootCause: 'No evidence of a recent application failure in the fetched logs.',
+      recommendedActions: ['Continue monitoring the project logs', 'Review deployment health if traffic or errors increase'],
+      poweredByGemini: false,
+    };
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    const dangerLevel: ProjectDangerLevel = recentErrors.some((e) => /fatal|critical|5\d\d|outage/i.test(e.message))
+      ? 'critical'
+      : recentErrors.length >= 5 ? 'high' : 'medium';
+    return {
+      ...base,
+      dangerLevel,
+      summary: `${recentErrors.length} recent error log entr${recentErrors.length === 1 ? 'y' : 'ies'} require attention.`,
+      probableRootCause: 'The available error logs indicate an application or deployment failure; Gemini analysis is unavailable.',
+      recommendedActions: ['Inspect the latest deployment and its environment variables', 'Trace the first error in the recent log window', 'Configure GEMINI_API_KEY for AI-assisted diagnosis'],
+      poweredByGemini: false,
+    };
+  }
+
+  try {
+    const prompt = `You are NOVA, diagnosing the Vercel project "${projectName}" (${projectId}).
+Analyze only the recent error logs below. Return ONLY valid JSON matching this exact schema:
+{
+  "dangerLevel": "low" | "medium" | "high" | "critical",
+  "summary": "concise incident summary",
+  "probableRootCause": "most likely root cause",
+  "recommendedActions": ["specific action 1", "specific action 2", "specific action 3"]
+}
+Recent errors:
+${JSON.stringify(recentErrors)}
+Full recent log window for context:
+${logs.slice(-30000)}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-flash-lite',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            dangerLevel: { type: 'STRING', enum: ['low', 'medium', 'high', 'critical'] },
+            summary: { type: 'STRING' },
+            probableRootCause: { type: 'STRING' },
+            recommendedActions: { type: 'ARRAY', items: { type: 'STRING' } },
+          },
+          required: ['dangerLevel', 'summary', 'probableRootCause', 'recommendedActions'],
+        },
+      },
+    });
+    const parsed = JSON.parse((response.text || '').trim()) as {
+      dangerLevel?: ProjectDangerLevel;
+      summary?: string;
+      probableRootCause?: string;
+      recommendedActions?: string[];
+    };
+    if (!parsed.dangerLevel || !parsed.summary || !parsed.probableRootCause || !Array.isArray(parsed.recommendedActions)) {
+      throw new Error('Gemini returned an incomplete project diagnosis');
+    }
+    return {
+      ...base,
+      dangerLevel: parsed.dangerLevel,
+      summary: parsed.summary,
+      probableRootCause: parsed.probableRootCause,
+      recommendedActions: parsed.recommendedActions,
+      poweredByGemini: true,
+    };
+  } catch (err: unknown) {
+    console.error('[Gemini] Project diagnosis failed:', err instanceof Error ? err.message : String(err));
+    return {
+      ...base,
+      dangerLevel: 'high',
+      summary: 'Recent errors were found, but the AI diagnosis could not be completed.',
+      probableRootCause: 'Review the recent errors directly; Gemini returned an invalid or unavailable diagnosis.',
+      recommendedActions: ['Inspect the latest deployment logs', 'Review the first error and its surrounding requests', 'Retry diagnosis after Gemini is available'],
+      poweredByGemini: false,
+    };
+  }
+}
+
 export async function analyzeIncident(incident: Incident): Promise<AiIncidentDiagnosis> {
   const ai = getGeminiClient();
 
@@ -93,4 +210,3 @@ Return only valid JSON.`;
     };
   }
 }
-
